@@ -24,7 +24,7 @@ def get_loader(args):
             transforms.Orientationd(keys=["image", "label"],
                                     axcodes="RAS"),
             transforms.Spacingd(keys=["image", "label"],
-                                pixdim=(args.space_x, args.space_y, args.space_z),
+                                pixdim=(args.space_x, args.space_y, args.space_z), # 指定输出的spacing dim
                                 mode=("bilinear", "nearest")),
             transforms.ScaleIntensityRanged(keys=["image"],
                                             a_min=args.a_min,
@@ -33,7 +33,7 @@ def get_loader(args):
                                             b_max=args.b_max,
                                             clip=True),
             transforms.CropForegroundd(keys=["image", "label"], source_key="image"),
-            transforms.RandCropByPosNegLabeld(
+            transforms.RandCropByPosNegLabeld(     # 随机根据大小裁剪出96*96*96的
                 keys=["image", "label"],
                 label_key="label",
                 spatial_size=(args.roi_x, args.roi_y, args.roi_x),

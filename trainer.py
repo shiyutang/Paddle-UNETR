@@ -54,7 +54,8 @@ def train_epoch(model,
                 scaler,
                 epoch,
                 loss_func,
-                args):
+                args,
+                local_rank):
     model.train()
     start_time = time.time()
     run_loss = AverageMeter()
@@ -63,7 +64,7 @@ def train_epoch(model,
             data, target = batch_data
         else:
             data, target = batch_data['image'], batch_data['label']
-        data, target = data.cuda(args.rank), target.cuda(args.rank)
+        # data, target = data.cuda(local_rank), target.cuda(local_rank) # here change to multiple gpu  ValueError: (InvalidArgument)  'device_id' must be a positive integer
         with auto_cast(enable=args.amp):
             logits = model(data)
             loss = loss_func(logits, target)
@@ -79,7 +80,7 @@ def train_epoch(model,
             optimizer.clear_grad()
 
         run_loss.update(loss.item(), n=args.batch_size)
-        if args.rank == 0:
+        if local_rank == 0 and idx % 100 == 0:
             print('Epoch {}/{} {}/{}'.format(epoch, args.max_epochs, idx, len(loader)),
                   'loss: {:.4f}'.format(run_loss.avg),
                   'time {:.2f}s'.format(time.time() - start_time))
@@ -94,7 +95,8 @@ def val_epoch(model,
               args,
               model_inferer=None,
               post_label=None,
-              post_pred=None):
+              post_pred=None,
+              local_rank=None):
     model.eval()
     start_time = time.time()
 
@@ -105,7 +107,6 @@ def val_epoch(model,
                 data, target = batch_data
             else:
                 data, target = batch_data['image'], batch_data['label']
-            data, target = data.cuda(args.rank), target.cuda(args.rank)
             with auto_cast(enable=args.amp):
                 if model_inferer is not None:
                     logits = model_inferer(data)
@@ -123,7 +124,7 @@ def val_epoch(model,
             avg_acc = np.mean([np.nanmean(l) for l in acc_list])
             avg_acc_list.append(avg_acc)
 
-            if args.rank == 0:
+            if local_rank == 0:
                 print('Val {}/{} {}/{}'.format(epoch, args.max_epochs, idx, len(loader)),
                       'acc', avg_acc,
                       'time {:.2f}s'.format(time.time() - start_time))
@@ -166,17 +167,27 @@ def run_training(model,
                  post_label=None,
                  post_pred=None
                  ):
+
+    nranks = paddle.distributed.ParallelEnv().nranks
+    local_rank = paddle.distributed.ParallelEnv().local_rank
+
+    if nranks > 1:
+        paddle.distributed.fleet.init(is_collective=True)
+        optimizer = paddle.distributed.fleet.distributed_optimizer(
+            optimizer)  # The return is Fleet object
+        ddp_model = paddle.distributed.fleet.distributed_model(model)
+
     writer = True
-    if args.logdir is not None and args.rank == 0:
+    if args.logdir is not None and local_rank == 0:
         writer = SummaryWriter(log_dir=args.logdir)
-        if args.rank == 0:
+        if local_rank == 0:
             print('Writing Tensorboard logs to ', args.logdir)
     scaler = None
     if args.amp:
         scaler = GradScaler()
     val_acc_max = 0.
     for epoch in range(start_epoch, args.max_epochs):
-        print(args.rank, time.ctime(), 'Epoch:', epoch)
+        print(local_rank, time.ctime(), 'Epoch:', epoch)
         epoch_time = time.time()
         train_loss = train_epoch(model,
                                  train_loader,
@@ -184,11 +195,12 @@ def run_training(model,
                                  scaler=scaler,
                                  epoch=epoch,
                                  loss_func=loss_func,
-                                 args=args)
-        if args.rank == 0:
+                                 args=args,
+                                 local_rank=local_rank)
+        if local_rank == 0:
             print('Final training  {}/{}'.format(epoch, args.max_epochs - 1), 'loss: {:.4f}'.format(train_loss),
                   'time {:.2f}s'.format(time.time() - epoch_time))
-        if args.rank == 0 and writer is not None:
+        if local_rank == 0 and writer is not None:
             writer.add_scalar('train_loss', train_loss, epoch)
         b_new_best = False
         if (epoch + 1) % args.val_every == 0:
@@ -200,8 +212,9 @@ def run_training(model,
                                     model_inferer=model_inferer,
                                     args=args,
                                     post_label=post_label,
-                                    post_pred=post_pred)
-            if args.rank == 0:
+                                    post_pred=post_pred,
+                                    local_rank=local_rank)
+            if local_rank == 0:
                 print('Final validation  {}/{}'.format(epoch, args.max_epochs - 1),
                       'acc', val_avg_acc, 'time {:.2f}s'.format(time.time() - epoch_time))
                 if writer is not None:
@@ -210,12 +223,12 @@ def run_training(model,
                     print('new best ({:.6f} --> {:.6f}). '.format(val_acc_max, val_avg_acc))
                     val_acc_max = val_avg_acc
                     b_new_best = True
-                    if args.rank == 0 and args.logdir is not None and args.save_checkpoint:
+                    if local_rank == 0 and args.logdir is not None and args.save_checkpoint:
                         save_checkpoint(model, epoch, args,
                                         best_acc=val_acc_max,
                                         optimizer=optimizer,
                                         scheduler=scheduler)
-            if args.rank == 0 and args.logdir is not None and args.save_checkpoint:
+            if local_rank == 0 and args.logdir is not None and args.save_checkpoint:
                 save_checkpoint(model,
                                 epoch,
                                 args,

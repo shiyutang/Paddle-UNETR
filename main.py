@@ -33,13 +33,14 @@ def main(args):
     np.set_printoptions(formatter={'float': '{: 0.3f}'.format}, suppress=True)
     args.test_mode = False
 
-    loader = get_loader(args)
+    paddle.set_device(args.place)
+
+    loader = get_loader(args) # 数据加载
     if args.rank == 0:
         print('Batch size is:', args.batch_size, 'epochs', args.max_epochs)
-    inf_size = [args.roi_x, args.roi_y, args.roi_x]
     pretrained_dir = args.pretrained_dir
     if (args.model_name is None) or args.model_name == 'unetr':
-        model = UNETR(
+        model = UNETR( # 模型应该可以直接接入
             in_channels=args.in_channels,
             out_channels=args.out_channels,
             img_size=(args.roi_x, args.roi_y, args.roi_z),
@@ -60,12 +61,14 @@ def main(args):
     else:
         raise ValueError('Unsupported model ' + str(args.model_name))
 
-    dice_loss = DiceCELoss(to_onehot_y=True,
+    inf_size = [args.roi_x, args.roi_y, args.roi_z]
+    dice_loss = DiceCELoss(to_onehot_y=True,   # diceloss 的实现需要兼容
                            softmax=True,
                            squared_pred=True,
                            smooth_nr=args.smooth_nr,
                            smooth_dr=args.smooth_dr)
-    post_label = AsDiscrete(to_onehot=True,
+    
+    post_label = AsDiscrete(to_onehot=True,         # 这个是什么： 转换argmax和onehot等
                             num_classes=args.out_channels)
     post_pred = AsDiscrete(argmax=True,
                            to_onehot=True,
@@ -73,7 +76,7 @@ def main(args):
     dice_acc = DiceMetric(include_background=True,
                           reduction=MetricReduction.MEAN,
                           get_not_nans=True)
-    model_inferer = partial(sliding_window_inference,
+    model_inferer = partial(sliding_window_inference,     # 滑窗预测
                             roi_size=inf_size,
                             sw_batch_size=args.sw_batch_size,
                             predictor=model,

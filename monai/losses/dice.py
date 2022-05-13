@@ -18,6 +18,28 @@ import paddle.nn.functional as F
 
 import utils.utils as utils
 
+def flatten(tensor):
+    """Flattens a given tensor such that the channel axis is first.
+    The shapes are transformed as follows:
+    (N, C, D, H, W) -> (C, N * D * H * W)
+    """
+    # new axis order
+    axis_order = (1, 0) + tuple(range(2, len(tensor.shape)))
+    # Transpose: (N, C, D, H, W) -> (C, N, D, H, W)
+    transposed = paddle.transpose(tensor, perm=axis_order)
+    # Flatten: (C, N, D, H, W) -> (C, N * D * H * W)
+    return paddle.flatten(transposed, start_axis=1, stop_axis=-1)
+
+def class_weights(tensor):
+    # normalize the input first
+    tensor = paddle.nn.functional.softmax(tensor, axis=1)
+    flattened = flatten(tensor)
+    nominator = (1. - flattened).sum(-1)
+    denominator = flattened.sum(-1)
+    class_weights = nominator / denominator
+    class_weights.stop_gradient = True
+
+    return class_weights
 
 class DiceLoss(nn.Layer):
     """
@@ -261,20 +283,45 @@ class DiceCELoss(nn.Layer):
         self.lambda_dice = lambda_dice
         self.lambda_ce = lambda_ce
 
-    def ce(self, input: paddle.Tensor, target: paddle.Tensor):
+    def ce(self, logit: paddle.Tensor, target: paddle.Tensor, weight=None):
         """
         Compute CrossEntropy loss for the input and target.
         Will remove the channel dim according to PyTorch CrossEntropyLoss:
         https://pytorch.org/docs/stable/generated/torch.nn.CrossEntropyLoss.html?#torch.nn.CrossEntropyLoss.
 
         """
-        n_pred_ch, n_target_ch = input.shape[1], target.shape[1]
-        if n_pred_ch == n_target_ch:
-            # target is in the one-hot format, convert to BH[WD] format to calculate ce loss
-            target = paddle.argmax(target, axis=1)
-        else:
-            target = paddle.squeeze(target, axis=1)
-        return self.cross_entropy(input.transpose([0, 2, 3, 4, 1]), target.cast('int64'))
+        # n_pred_ch, n_target_ch = input.shape[1], target.shape[1]
+        # if n_pred_ch == n_target_ch:
+        #     # target is in the one-hot format, convert to BH[WD] format to calculate ce loss
+        #     target = paddle.argmax(target, axis=1)
+        # else:
+        #     target = paddle.squeeze(target, axis=1)
+        # return self.cross_entropy(input.transpose([0, 2, 3, 4, 1]), target.cast('int64'))
+        
+        target = target.astype("int64")
+        # target.shape: │[3, 128, 128, 128] logit.shape: [3, 3, 128, 128, 128]
+
+        if len(logit.shape) == 4:
+            logit = logit.unsqueeze(0)
+
+        if weight is None:
+            weight = class_weights(logit)
+            if logit.shape[1] != len(weight):
+                raise ValueError(
+                    'The number of weights = {} must be the same as the number of classes = {}.'
+                    .format(len(weight), logit.shape[1]))
+
+        logit = paddle.transpose(logit, [0, 2, 3, 4, 1])  # NCDHW -> NDHWC
+        target = paddle.transpose(target, [0, 2, 3, 4, 1])  # NCDHW -> NDHWC
+        
+        loss = F.cross_entropy(
+            logit + 1e-8,  # [4, 96, 96, 96, 16]
+            target,        # [4, 96, 96, 96, 1]
+            reduction='mean',
+            ignore_index=-1,
+            weight=weight)
+
+        return loss
 
     def forward(self, input: paddle.Tensor, target: paddle.Tensor) -> paddle.Tensor:
         """

@@ -123,6 +123,7 @@ def convert_to_tensor(
             # `ascontiguousarray` will add 1 dim if img has no dim, so we only apply on data with dims
             if data.ndim > 0:
                 data = np.ascontiguousarray(data)
+            paddle.disable_static()
             return paddle.to_tensor(data, dtype=dtype)  # type: ignore
     elif (has_cp and isinstance(data, cp_ndarray)) or isinstance(data, (float, int, bool)):
         return paddle.to_tensor(data, dtype=dtype)  # type: ignore
